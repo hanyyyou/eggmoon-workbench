@@ -6,10 +6,10 @@ Write-Host "Windows version $([Environment]::OSVersion.Version); Windows PowerSh
 Write-Host "Runner system Node: $(node --version)"
 $dest = Join-Path $env:RUNNER_TEMP '训练营 空格 & 月'
 $zip = Join-Path $env:RUNNER_TEMP 'student-public.zip'
-Invoke-WebRequest -UseBasicParsing 'https://github.com/hanyyyou/eggmoon-workbench/releases/download/v2026.11.13/story-camp-workbench.zip' -OutFile $zip
+Invoke-WebRequest -UseBasicParsing 'https://github.com/hanyyyou/eggmoon-workbench/releases/download/v2026.11.13.1/story-camp-workbench.zip' -OutFile $zip
 $pkgHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
 Write-Host "SHA256 $pkgHash"
-if ($pkgHash -ne 'e4edce66c6872554e6573d8dd89646a0d7516bb8b0fa24326e93d6e12bd0f0bd') { throw 'Unexpected release asset' }
+if ($pkgHash -ne '2adc28d649788d9ce5d3e2bc51ccbf9d8568c12eb46f11080a48f7dc117d953a') { throw 'Unexpected release asset' }
 Expand-Archive -LiteralPath $zip -DestinationPath $dest
 $app = Join-Path $dest 'story-camp'
 $skill = Join-Path $app '.codebuddy\skills\camp-story-news\SKILL.md'
@@ -100,16 +100,71 @@ try {
   Write-Host 'Foreground service started, answered and exited cleanly'
 } finally { if (!$service.HasExited) { $service.Kill() } }
 Remove-Item Env:EGGMOON_WORKBENCH_OFFLINE
-$first = (& .\open.cmd news-refresh | Select-Object -Last 1) | ConvertFrom-Json
-$firstExit = $LASTEXITCODE
-$second = (& .\open.cmd news-refresh | Select-Object -Last 1) | ConvertFrom-Json
-$secondExit = $LASTEXITCODE
-Write-Host "First: $($first | ConvertTo-Json -Compress)"
-Write-Host "Second: $($second | ConvertTo-Json -Compress)"
-if ($first.task -ne 'social-news' -or !$first.checkedAt -or $first.checkedAt -ne $second.checkedAt) { throw 'Daily action did not preserve a single check per calendar day' }
-& .\open.cmd status
-if ($LASTEXITCODE -eq 0) { throw 'news-refresh unexpectedly started a web server' }
-if ($firstExit -ne 0 -or $secondExit -ne 0 -or $second.outcome -ne 'unchanged') { throw "Live sources or update command failed; exits $firstExit / $secondExit" }
+$toolDir = Join-Path $env:RUNNER_TEMP 'camp-browser-qa'
+[void](New-Item -ItemType Directory -Force -Path $toolDir)
+& npm.cmd install --prefix $toolDir --ignore-scripts --no-audit --no-fund playwright-core@1.61.1
+if ($LASTEXITCODE -ne 0) { throw 'Unable to install browser test driver.' }
+$env:NODE_PATH = Join-Path $toolDir 'node_modules'
+$probe = Join-Path $toolDir 'browser.cjs'
+$js = @'
+const {chromium} = require('playwright-core');
+const crypto = require('node:crypto');
+const fs = require('node:fs/promises');
+const assert = require('node:assert/strict');
+
+(async () => {
+  const browser = await chromium.launch({channel:'msedge',headless:true});
+  const page = await browser.newPage({acceptDownloads:true});
+  let full = false;
+  try {
+    for (const platform of ['ciweimao','faloo']) {
+      await page.goto('http://127.0.0.1:18377/workspace?platform='+platform, {waitUntil:'domcontentloaded'});
+      const select = page.locator('button.camp-book-title').first();
+      await select.click({timeout:30_000});
+      const action = page.getByRole('button',{name:'下载前10章', exact:true});
+      await action.waitFor({state:'visible'});
+      const response = page.waitForResponse(res => res.url().includes('/api/camp/book-chapters?') && res.request().method()==='POST',{timeout:190_000});
+      let got;
+      const onDownload = download => {got=download};
+      page.once('download', onDownload);
+      await action.click();
+      const res=await response;
+      const body=await res.json();
+      const chapters=Array.isArray(body.chapters)?body.chapters:[];
+      if(!chapters.length) {
+        page.removeListener('download',onDownload);
+        console.log(JSON.stringify({platform,status:res.status(),chapters:0,sourceStatus:(body.message||body.error||'').slice(0,180)}));
+        continue;
+      }
+      assert.ok(chapters.length<=10);
+      assert.ok(chapters.every(c=>c.text?.trim() && c.title?.trim() && c.url?.startsWith('http')));
+      await page.waitForFunction(()=>document.querySelector('.camp-chapter-export [role="status"]')?.textContent?.includes('TXT'),null,{timeout:12000});
+      if (!got) got=await page.waitForEvent('download',{timeout:10000});
+      assert.ok(got.suggestedFilename().endsWith('前'+chapters.length+'章.txt'));
+      const raw=await fs.readFile(await got.path());
+      const value=raw.toString('utf8').replace(/\r\n/g,'\n');
+      for (const ch of chapters) {
+        assert.ok(value.includes(ch.url) && value.includes(ch.text.trim().replace(/\r\n?/g,'\n')));
+      }
+      console.log(JSON.stringify({platform,status:res.status(),chapters:chapters.length,byteLength:raw.length,sha256:crypto.createHash('sha256').update(raw).digest('hex')}));
+      await got.delete();
+      if(chapters.length===10) {full=true;break;}
+    }
+    if(!full) throw Error('Neither tested platform supplied all ten public chapters from this Windows runner.');
+  } finally {await browser.close();}
+})().catch(err=>{console.error(err.message);process.exitCode=1;});
+
+
+'@
+Set-Content -LiteralPath $probe -Value $js -Encoding UTF8
+& .\open.cmd start-service
+if ($LASTEXITCODE -ne 0) { throw 'Failed to start online service.' }
+try {
+  & node $probe
+  if ($LASTEXITCODE -ne 0) { throw 'Real chapter download in Edge did not pass.' }
+} finally {
+  & .\open.cmd stop
+}
 exit 0
 }
 }
