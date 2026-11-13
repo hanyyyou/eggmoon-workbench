@@ -6,4 +6,6 @@
 
 在工作台里浏览小说榜单、查看作品简介和收藏作品。「社会热点新闻」收录婚恋与家庭纠纷报道的原标题、日期和原文链接。
 
+在作品详情可下载刺猬猫、飞卢的开头最多十章。其他平台按作品显示原站阅读或获许可后的导出选项。
+
 [下载最新成品包](https://github.com/hanyyyou/eggmoon-workbench/releases/latest/download/story-camp-workbench.zip)
